@@ -187,27 +187,47 @@
   let generatedCsv = "";
 
   // Show all画面のコピー結果(API参照名/表示ラベル/データ型/値が縦4行1組)を解析する。
-  // 既知の制約: 「値」が空の項目があると4行の並びが崩れてズレる。現時点では対策せず、貼り付け前の目視確認で運用回避する。
+  // 実際の貼り付けデータでは項目ごとに空行が挟まる場合と挟まらない場合の両方があるため、
+  // まず空行で「かたまり」に分割し、各かたまりの中で4行区切りを適用する(空行なしの連続テキストなら
+  // かたまりが1つになるだけで、従来どおり同じロジックで解析できる)。
+  // 既知の制約: 「値」が本当に空(かたまりが3行しかない)の場合は値を空欄として扱うが、
+  // 「値」自体が他の行と誤って結合されているような崩れ方までは救えない。
   function parseShowAllText(text) {
     if (!text || !text.trim()) return [];
 
-    let lines = text.split(/\r\n|\r|\n/);
-    while (lines.length > 0 && lines[0].trim() === "") lines.shift();
-    while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
-
-    let startIndex = 0;
-    if (lines.length > 0 && HEADER_FIRST_LINE_TOKENS.has(lines[0].trim().toLowerCase())) {
-      startIndex = 4;
+    const rawLines = text.split(/\r\n|\r|\n/);
+    const chunks = [];
+    let current = [];
+    for (const rawLine of rawLines) {
+      const line = rawLine.trim();
+      if (line === "") {
+        if (current.length > 0) {
+          chunks.push(current);
+          current = [];
+        }
+      } else {
+        current.push(line);
+      }
     }
+    if (current.length > 0) chunks.push(current);
 
     const fields = [];
-    for (let i = startIndex; i + 3 < lines.length; i += 4) {
-      fields.push({
-        apiName: lines[i].trim(),
-        label: lines[i + 1].trim(),
-        rawType: lines[i + 2].trim(),
-        sampleValue: lines[i + 3].trim()
-      });
+    for (const chunk of chunks) {
+      let i = 0;
+      if (HEADER_FIRST_LINE_TOKENS.has(chunk[0].toLowerCase())) {
+        i = 4;
+      }
+      for (; i + 3 < chunk.length; i += 4) {
+        fields.push({
+          apiName: chunk[i],
+          label: chunk[i + 1],
+          rawType: chunk[i + 2],
+          sampleValue: chunk[i + 3]
+        });
+      }
+      if (chunk.length - i === 3) {
+        fields.push({ apiName: chunk[i], label: chunk[i + 1], rawType: chunk[i + 2], sampleValue: "" });
+      }
     }
     return fields;
   }
@@ -276,8 +296,11 @@
   }
 
   function generateValue(field, rowIndex, settings) {
+    // Salesforce Inspector ReloadedはUI上の型名(text等)ではなく、Schema APIの型名(string等)を
+    // そのまま表示することがあるため、両方のパターンを型のエイリアスとして扱う。
     switch (getBaseType(field.rawType)) {
       case "text":
+      case "string":
       case "textarea":
       case "phone":
       case "url":
@@ -289,6 +312,8 @@
       case "datetime":
         return randomDateTimeBetween(settings.dateStart, settings.dateEnd);
       case "number":
+      case "double":
+      case "int":
       case "currency":
       case "percent":
         return randomNumber(field, settings.numberMin, settings.numberMax);
@@ -297,6 +322,7 @@
         return Math.random() < 0.5 ? "false" : "true";
       case "picklist":
       case "multipicklist":
+      case "combobox":
         return field.sampleValue;
       case "lookup":
       case "id":
