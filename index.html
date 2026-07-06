@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Salesforceダミーデータ生成ツール</title>
+<style>
+  :root {
+    color-scheme: light dark;
+  }
+  body {
+    font-family: "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    max-width: 960px;
+    margin: 24px auto;
+    padding: 0 16px;
+    line-height: 1.5;
+  }
+  h1 {
+    font-size: 1.4rem;
+  }
+  fieldset {
+    margin-bottom: 20px;
+    padding: 12px 16px 16px;
+    border-radius: 6px;
+  }
+  legend {
+    font-weight: bold;
+    padding: 0 6px;
+  }
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.85rem;
+  }
+  .button-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .table-scroll {
+    max-height: 280px;
+    overflow: auto;
+    border: 1px solid #8888;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  th, td {
+    border: 1px solid #8888;
+    padding: 4px 8px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  thead th {
+    position: sticky;
+    top: 0;
+    background: canvas;
+  }
+  .settings-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 10px 12px;
+    align-items: center;
+  }
+  .range-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  input[type="text"], input[type="date"], input[type="number"] {
+    font-family: inherit;
+    font-size: 0.9rem;
+    padding: 3px 6px;
+  }
+  #emailDomain {
+    width: 100%;
+    box-sizing: border-box;
+  }
+  button {
+    padding: 6px 14px;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  .note {
+    font-size: 0.8rem;
+    opacity: 0.75;
+  }
+</style>
+</head>
+<body>
+<h1>Salesforceダミーデータ生成ツール</h1>
+<p class="note">
+  Salesforce Inspector ReloadedのShow all画面からコピーした項目一覧を貼り付けて、
+  検証用トライアル組織に投入するダミーデータのCSVを作成します。
+  すべての処理はこのページ内(ブラウザ内)で完結し、貼り付けた内容や生成結果が外部に送信されることはありません。
+</p>
+
+<fieldset>
+  <legend>Show all画面からコピーした項目一覧を貼り付け</legend>
+  <textarea id="pasteArea" rows="10" placeholder="Show all画面からコピーしたテキストをここに貼り付けてください"></textarea>
+  <div class="button-row">
+    <button id="loadSampleBtn" type="button">サンプルを読み込む</button>
+    <button id="analyzeBtn" type="button">解析</button>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>解析結果プレビュー</legend>
+  <div class="table-scroll">
+    <table id="previewTable">
+      <thead>
+        <tr>
+          <th>API参照名</th>
+          <th>表示ラベル</th>
+          <th>データ型</th>
+          <th>値</th>
+          <th>必須</th>
+        </tr>
+      </thead>
+      <tbody id="previewBody"></tbody>
+    </table>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>生成設定</legend>
+  <div class="settings-grid">
+    <label for="emailDomain">メールドメイン(組織ごとに変更):</label>
+    <input type="text" id="emailDomain" value="example-dummy.com" />
+
+    <label for="dateStart">日付範囲(date/datetime用):</label>
+    <div class="range-row">
+      <input type="date" id="dateStart" />
+      <span>〜</span>
+      <input type="date" id="dateEnd" />
+    </div>
+
+    <label for="numberMin">数値範囲(number/currency用):</label>
+    <div class="range-row">
+      <input type="number" id="numberMin" value="0" step="any" />
+      <span>〜</span>
+      <input type="number" id="numberMax" value="100000" step="any" />
+    </div>
+
+    <label for="count">生成件数:</label>
+    <div class="range-row">
+      <input type="number" id="count" value="10" min="1" />
+      <button id="generateBtn" type="button">生成</button>
+    </div>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>生成結果プレビュー(CSV)</legend>
+  <textarea id="resultArea" rows="10" readonly placeholder="「生成」を押すとここにCSVが表示されます"></textarea>
+  <div class="button-row">
+    <button id="downloadBtn" type="button">CSVダウンロード</button>
+  </div>
+</fieldset>
+
+<script>
+(function () {
+  "use strict";
+
+  const ALPHANUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const HEADER_FIRST_LINE_TOKENS = new Set(["api参照名", "api name", "api reference name", "フィールド名"]);
+  const SAMPLE_TEXT = [
+    "API参照名", "表示ラベル", "データ型", "値",
+    "Name", "取引先名", "text (80),required", "テスト株式会社",
+    "AccountNumber", "取引先番号", "text (40)", "ACC-0001",
+    "Industry", "業種", "picklist", "Technology",
+    "AnnualRevenue", "年間売上高", "currency (16, 2)", "1000000",
+    "NumberOfEmployees", "従業員数", "number (8, 0)", "50",
+    "Active__c", "有効", "checkbox", "true",
+    "LastActivityDate", "最終活動日", "date", "2024-01-01",
+    "CreatedDate", "作成日時", "datetime", "2024-01-01T10:00:00.000Z",
+    "PersonEmail", "メールアドレス", "email", "sample@example.com",
+    "OwnerId", "所有者ID", "lookup(User)", "0053h000004ABCXYZ",
+    "CaseNumber", "採番", "autonumber", "00001"
+  ].join("\n");
+
+  let parsedFields = [];
+  let generatedCsv = "";
+
+  // Show all画面のコピー結果(API参照名/表示ラベル/データ型/値が縦4行1組)を解析する。
+  // 既知の制約: 「値」が空の項目があると4行の並びが崩れてズレる。現時点では対策せず、貼り付け前の目視確認で運用回避する。
+  function parseShowAllText(text) {
+    if (!text || !text.trim()) return [];
+
+    let lines = text.split(/\r\n|\r|\n/);
+    while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+    while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+
+    let startIndex = 0;
+    if (lines.length > 0 && HEADER_FIRST_LINE_TOKENS.has(lines[0].trim().toLowerCase())) {
+      startIndex = 4;
+    }
+
+    const fields = [];
+    for (let i = startIndex; i + 3 < lines.length; i += 4) {
+      fields.push({
+        apiName: lines[i].trim(),
+        label: lines[i + 1].trim(),
+        rawType: lines[i + 2].trim(),
+        sampleValue: lines[i + 3].trim()
+      });
+    }
+    return fields;
+  }
+
+  function getBaseType(rawType) {
+    if (!rawType) return "";
+    const match = rawType.toLowerCase().match(/^[a-z]+/);
+    return match ? match[0] : "";
+  }
+
+  function isRequired(rawType) {
+    return !!rawType && rawType.toLowerCase().includes("required");
+  }
+
+  function getMaxLength(rawType) {
+    if (!rawType) return null;
+    const match = rawType.match(/\((\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  }
+
+  function getDecimalPlaces(rawType) {
+    if (!rawType) return null;
+    const match = rawType.match(/\(\s*\d+\s*,\s*(\d+)\s*\)/);
+    return match ? parseInt(match[1], 10) : null;
+  }
+
+  function randomAlphaNum(length) {
+    let s = "";
+    for (let i = 0; i < length; i++) {
+      s += ALPHANUM[Math.floor(Math.random() * ALPHANUM.length)];
+    }
+    return s;
+  }
+
+  function randomText(field) {
+    const maxLength = getMaxLength(field.rawType);
+    const length = Math.max(maxLength ? Math.min(maxLength, 10) : 10, 1);
+    return randomAlphaNum(length);
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function formatDate(d) {
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+
+  function randomDateBetween(start, end) {
+    const t = start.getTime() + Math.random() * (end.getTime() - start.getTime());
+    return new Date(t);
+  }
+
+  function randomDateTimeBetween(start, end) {
+    const datePart = randomDateBetween(start, end);
+    const hh = pad2(Math.floor(Math.random() * 24));
+    const mm = pad2(Math.floor(Math.random() * 60));
+    const ss = pad2(Math.floor(Math.random() * 60));
+    return `${formatDate(datePart)}T${hh}:${mm}:${ss}`;
+  }
+
+  function randomNumber(field, min, max) {
+    const decimals = getDecimalPlaces(field.rawType) || 0;
+    const value = min + Math.random() * (max - min);
+    return value.toFixed(decimals);
+  }
+
+  function generateValue(field, rowIndex, settings) {
+    switch (getBaseType(field.rawType)) {
+      case "text":
+      case "textarea":
+      case "phone":
+      case "url":
+        return randomText(field);
+      case "email":
+        return `${rowIndex}@${settings.emailDomain}`;
+      case "date":
+        return formatDate(randomDateBetween(settings.dateStart, settings.dateEnd));
+      case "datetime":
+        return randomDateTimeBetween(settings.dateStart, settings.dateEnd);
+      case "number":
+      case "currency":
+      case "percent":
+        return randomNumber(field, settings.numberMin, settings.numberMax);
+      case "checkbox":
+      case "boolean":
+        return Math.random() < 0.5 ? "false" : "true";
+      case "picklist":
+      case "multipicklist":
+        return field.sampleValue;
+      case "lookup":
+      case "id":
+      case "reference":
+        return randomAlphaNum(18);
+      default:
+        return field.sampleValue || "";
+    }
+  }
+
+  function generateRows(fields, count, settings) {
+    const rows = [];
+    for (let rowIndex = 1; rowIndex <= count; rowIndex++) {
+      rows.push(fields.map((field) => generateValue(field, rowIndex, settings)));
+    }
+    return rows;
+  }
+
+  function escapeCsvValue(value) {
+    const str = value === null || value === undefined ? "" : String(value);
+    const needsQuote = /[",\r\n]/.test(str);
+    const escaped = str.replace(/"/g, '""');
+    return needsQuote ? `"${escaped}"` : escaped;
+  }
+
+  function toCsv(fields, rows) {
+    const lines = [fields.map((f) => escapeCsvValue(f.apiName)).join(",")];
+    for (const row of rows) {
+      lines.push(row.map(escapeCsvValue).join(","));
+    }
+    return lines.join("\r\n") + "\r\n";
+  }
+
+  function renderPreviewTable(fields) {
+    const tbody = document.getElementById("previewBody");
+    tbody.innerHTML = "";
+    for (const field of fields) {
+      const tr = document.createElement("tr");
+      [field.apiName, field.label, field.rawType, field.sampleValue, isRequired(field.rawType) ? "○" : ""]
+        .forEach((text) => {
+          const td = document.createElement("td");
+          td.textContent = text;
+          tr.appendChild(td);
+        });
+      tbody.appendChild(tr);
+    }
+  }
+
+  function todayInputValue() {
+    return formatDate(new Date());
+  }
+
+  function yearsAgoInputValue(years) {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() - years);
+    return formatDate(d);
+  }
+
+  function downloadCsv(csvText, filename) {
+    const blob = new Blob(["﻿" + csvText], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  document.getElementById("dateStart").value = yearsAgoInputValue(2);
+  document.getElementById("dateEnd").value = todayInputValue();
+
+  document.getElementById("loadSampleBtn").addEventListener("click", () => {
+    document.getElementById("pasteArea").value = SAMPLE_TEXT;
+  });
+
+  document.getElementById("analyzeBtn").addEventListener("click", () => {
+    const fields = parseShowAllText(document.getElementById("pasteArea").value);
+    parsedFields = fields;
+    renderPreviewTable(fields);
+    if (fields.length === 0) {
+      alert("項目を解析できませんでした。貼り付け内容を確認してください。");
+    }
+  });
+
+  document.getElementById("generateBtn").addEventListener("click", () => {
+    if (parsedFields.length === 0) {
+      alert("先に「解析」を実行してください。");
+      return;
+    }
+
+    const emailDomain = document.getElementById("emailDomain").value.trim();
+    if (!emailDomain) {
+      alert("メールドメインを入力してください。");
+      return;
+    }
+
+    const dateStart = new Date(document.getElementById("dateStart").value);
+    const dateEnd = new Date(document.getElementById("dateEnd").value);
+    if (isNaN(dateStart.getTime()) || isNaN(dateEnd.getTime())) {
+      alert("日付範囲を正しく入力してください。");
+      return;
+    }
+    if (dateStart.getTime() > dateEnd.getTime()) {
+      alert("日付範囲の開始が終了より後になっています。");
+      return;
+    }
+
+    const numberMin = parseFloat(document.getElementById("numberMin").value);
+    const numberMax = parseFloat(document.getElementById("numberMax").value);
+    if (isNaN(numberMin) || isNaN(numberMax)) {
+      alert("数値範囲を正しく入力してください。");
+      return;
+    }
+    if (numberMin > numberMax) {
+      alert("数値範囲の最小値が最大値より大きくなっています。");
+      return;
+    }
+
+    const count = parseInt(document.getElementById("count").value, 10);
+    if (isNaN(count) || count < 1) {
+      alert("生成件数を正しく入力してください。");
+      return;
+    }
+
+    const settings = { emailDomain, dateStart, dateEnd, numberMin, numberMax };
+    const rows = generateRows(parsedFields, count, settings);
+    generatedCsv = toCsv(parsedFields, rows);
+
+    document.getElementById("resultArea").value = generatedCsv;
+  });
+
+  document.getElementById("downloadBtn").addEventListener("click", () => {
+    if (!generatedCsv) {
+      alert("先に「生成」を実行してください。");
+      return;
+    }
+    downloadCsv(generatedCsv, "dummy_data.csv");
+  });
+})();
+</script>
+</body>
+</html>
